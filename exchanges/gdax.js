@@ -224,10 +224,41 @@ Trader.prototype.cancelOrder = function(order, callback) {
 Trader.prototype.getTrades = function(since, callback, descending) {
     var args = _.toArray(arguments);
     var lastScan = 0;
+    // GDAX rate limit of 3 per second
+    var minDelay = 334;
+    var lastAttempt = 0;
+
+    var getProductTrades = (options, gdaxCallback) => {
+        var now = moment.utc();
+
+        if (now - lastAttempt < minDelay) {
+            setTimeout(() => getProductTrades(options, gdaxCallback), minDelay - (now - lastAttempt));
+            return;
+        }
+
+        lastAttempt = now;
+
+        this.gdax_public.getProductTrades(options, (err, response, data) => {
+            if (response.statusCode === 429) {
+                // We didn't wait long enough, increase the delay and try again
+                minDelay += 30;
+                log.debug('Recieved 429 response, increasing delay to', minDelay, 'ms');
+                setTimeout(() => getProductTrades(options, gdaxCallback), minDelay);
+            }
+            else {
+                gdaxCallback(err, response, data);
+            }
+        });
+    };
 
     var process = function(err, response, data) {
-        if(err)
+        if (data && data.message)
+            err = new Error(data.message);
+            
+        if(err) {
+            log.debug('Error fetching trades:', err);
             return this.retry(this.getTrades, args);
+        }
 
         var result = _.map(data, function(trade) {
             return {
@@ -249,7 +280,7 @@ Trader.prototype.getTrades = function(since, callback, descending) {
                     this.scanbackTid = last.trade_id;
                 } else {
                     log.debug('Scanning backwards...' + last.time);
-                    this.gdax_public.getProductTrades({after: last.trade_id - (batchSize * lastScan) , limit: batchSize}, process);
+                    getProductTrades({after: last.trade_id - (batchSize * lastScan) , limit: batchSize}, process);
                     lastScan++;
                     if (lastScan > 100) {
                         lastScan = 10;
@@ -269,7 +300,7 @@ Trader.prototype.getTrades = function(since, callback, descending) {
 
                     if (this.scanbackTid != first.trade_id) {
                         this.scanbackTid = first.trade_id;
-                        this.gdax_public.getProductTrades({after: this.scanbackTid + batchSize + 1, limit: batchSize}, process);
+                        getProductTrades({after: this.scanbackTid + batchSize + 1, limit: batchSize}, process);
                     } else {
                         this.scanback = false;
                         this.scanbackTid = 0;
@@ -289,14 +320,14 @@ Trader.prototype.getTrades = function(since, callback, descending) {
     if (since || this.scanback) {
         this.scanback = true;
         if (this.scanbackTid) {
-            this.gdax_public.getProductTrades({after: this.scanbackTid + batchSize + 1, limit: batchSize}, process);
+            getProductTrades({after: this.scanbackTid + batchSize + 1, limit: batchSize}, process);
         } else {
             log.debug('Scanning back in the history needed...');
             log.debug(moment.utc(since).format());
-            this.gdax_public.getProductTrades({limit: batchSize}, process);
+            getProductTrades({limit: batchSize}, process);
         }
     } else {
-        this.gdax_public.getProductTrades({limit: batchSize}, process);
+        getProductTrades({limit: batchSize}, process);
     }
 
 }
